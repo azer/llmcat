@@ -1,11 +1,17 @@
 #!/bin/bash
-
-# Config
 set -eo pipefail
+
+# Default configuration values
 CLIP_CMD=""
 VERSION="1.0.0"
 QUIET="true"
 DEBUG="false"
+custom_ignores=""
+tree_only="false"
+
+# Git integration flags
+GIT_DIFF="false"
+GIT_ONLY="false"
 
 # Help text
 show_help() {
@@ -17,49 +23,21 @@ Usage: llmcat [options] [path]
 
 Options:
     -h, --help              Show this help message
+    -v, --version           Show version
     -i, --ignore PATTERN    Additional ignore patterns (grep -E format)
-    -v, --version          Show version
-    -t, --tree-only        Only output directory tree
-    -q, --quiet            Silent mode (only copy to clipboard)
-    -p, --print            Print copied files/content (default: quiet)
-    --debug                Enable debug output
-
-Interactive Mode (fzf):
-    tab          - Select/mark multiple files
-    shift-tab    - Unselect/unmark file
-    ctrl-/       - Toggle preview window
-    ctrl-d       - Select directory mode
-    ctrl-f       - Select file mode
-    enter        - Confirm selection(s)
-    esc          - Exit
+    -t, --tree-only         Only output directory tree
+    -q, --quiet             Silent mode (only copy to clipboard)
+    -p, --print             Print copied files/content (default: quiet)
+    --debug                 Enable debug output
+    --git-diff              Append Git diff for each processed file (if tracked)
+    --git-only              Limit interactive mode to only changed files (via Git status)
 
 Examples:
     # Interactive file selection
     llmcat
 
-    # Process specific file
-    llmcat path/to/file.txt
-
-    # Process directory with custom ignore
-    llmcat -i "*.log|*.tmp" ./src/
-
-    # Print content while copying
-    llmcat -p ./src/file.txt
-
-Features:
-    - Interactive fuzzy finder with file preview
-    - Auto-copies output to clipboard
-    - Respects .gitignore
-    - Directory tree visualization
-    - Multi-file selection
-    - Cross-platform (Linux/OSX)
-
-Author:
-    Azer Koculu (https://azerkoculu.com)
-
-See Also:
-    Project Home:
-      https://github.com/azer/llmcat
+    # Process specific file with Git diff appended (if any)
+    llmcat --git-diff path/to/file.txt
 EOF
 }
 
@@ -119,28 +97,7 @@ setup_fzf() {
     return 0
 }
 
-# Parse .gitignore into grep pattern
-parse_gitignore() {
-    local gitignore="$1"
-    if [ -f "$gitignore" ]; then
-        grep -v '^#' "$gitignore" | \
-        grep -v '^\s*$' | \
-        sed 's/\./\\./g' | \
-        sed 's/\*/[^\/]*/g' | \
-        tr '\n' '|' | \
-        sed 's/|$//'
-    fi
-}
-
-# Get relative path from root
-get_relative_path() {
-    local path="$1"
-    local root_dir
-    root_dir=$(find_root)
-    echo "${path#$root_dir/}"
-}
-
-# Run fzf with configuration
+# Run fzf with support for --git-only filtering and custom ignore patterns
 run_fzf() {
     local gitignore_pattern="$1"
     local custom_ignores="$2"
@@ -149,7 +106,7 @@ run_fzf() {
 
     debug "Running fzf from: $root_dir"
 
-    # Preview script to handle files vs directories
+    # Preview command to show file contents or directory tree
     local preview_cmd='
         if [ -f {} ]; then
             bat --style=numbers --color=always {} 2>/dev/null
@@ -158,15 +115,26 @@ run_fzf() {
             tree -C {} 2>/dev/null || ls -la {} 2>/dev/null
         fi'
 
-    # Change to root directory temporarily
+    # Determine file listing command based on --git-only option
+    local find_cmd=""
+    if [ "$GIT_ONLY" = "true" ]; then
+        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            find_cmd="git status --porcelain | awk '{print \$2}'"
+        else
+            echo "Warning: --git-only specified but not inside a Git repository. Using default file listing." >&2
+            find_cmd="find . -type f -o -type d"
+        fi
+    else
+        find_cmd="find . -type f -o -type d"
+    fi
+
+    # Append ignore patterns if provided
+    [ -n "$gitignore_pattern" ] && find_cmd+=" | grep -Ev \"$gitignore_pattern\""
+    [ -n "$custom_ignores" ] && find_cmd+=" | grep -Ev \"$custom_ignores\""
+
+    debug "Find command: $find_cmd"
+
     (cd "$root_dir" && {
-        local find_cmd="find . -type f -o -type d"
-        [ -n "$gitignore_pattern" ] && find_cmd+=" | grep -Ev \"$gitignore_pattern\""
-        [ -n "$custom_ignores" ] && find_cmd+=" | grep -Ev \"$custom_ignores\""
-
-        debug "Find command: $find_cmd"
-
-        # Remove leading ./ from paths
         eval "$find_cmd" | sed 's|^\./||' | fzf \
             --preview "$preview_cmd" \
             --preview-window 'right:60%:border-left' \
@@ -174,6 +142,7 @@ run_fzf() {
             --bind 'ctrl-d:change-prompt(Select directories > )+reload(find . -type d | sed "s|^./||")' \
             --bind 'ctrl-f:change-prompt(Select files > )+reload(find . -type f | sed "s|^./||")' \
             --bind 'tab:toggle+up' \
+            --bind 'shift-tab:toggle+down' \
             --height '80%' \
             --border=rounded \
             --prompt '⚡ Select files/dirs > ' \
@@ -182,28 +151,43 @@ run_fzf() {
     })
 }
 
-
-# Process file content
+# Process file content and optionally append Git diff output
 process_file() {
     local file="$1"
     local rel_path
-    rel_path=$(get_relative_path "$file")
+    rel_path=$(echo "$file" | sed "s|$(find_root)/||")
     {
         echo "## File: $rel_path"
         echo "---"
         cat "$file"
         echo
+        if [ "$GIT_DIFF" = "true" ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+                local diff_output
+                diff_output=$(git diff "$file" 2>/dev/null)
+                if [ -n "$diff_output" ]; then
+                    echo "### Git Diff for $rel_path"
+                    echo '```diff'
+                    echo "$diff_output"
+                    echo '```'
+                else
+                    echo "### No changes in Git for $rel_path"
+                fi
+            else
+                echo "### File not tracked in Git: $rel_path"
+            fi
+        fi
     }
 }
 
-# Process directory content
+# Process directory content: generate a tree view and process files within
 process_dir() {
     local dir="$1"
     local custom_ignores="$2"
     local tree_only="$3"
     local gitignore_pattern=""
     local rel_path
-    rel_path=$(get_relative_path "$dir")
+    rel_path=$(echo "$dir" | sed "s|$(find_root)/||")
 
     [ -f "$dir/.gitignore" ] && gitignore_pattern=$(parse_gitignore "$dir/.gitignore")
 
@@ -212,7 +196,6 @@ process_dir() {
         echo "---"
         echo
 
-        # Tree output
         local tree_output
         if command -v tree >/dev/null 2>&1; then
             tree_output=$(cd "$dir" && tree -I "$(echo "$gitignore_pattern" | tr '|' ' ')")
@@ -232,7 +215,6 @@ process_dir() {
         fi
         echo "$tree_output"
 
-        # Process files only if not tree_only
         if [ "$tree_only" != "true" ]; then
             find "$dir" -type f 2>/dev/null | \
             if [ -n "$gitignore_pattern" ]; then
@@ -253,19 +235,26 @@ process_dir() {
     }
 }
 
-# Handle output
+# Parse .gitignore into a regex pattern
+parse_gitignore() {
+    local gitignore="$1"
+    if [ -f "$gitignore" ]; then
+        grep -v '^#' "$gitignore" | \
+        grep -v '^\s*$' | \
+        sed 's/\./\\./g' | \
+        sed 's/\*/[^\/]*/g' | \
+        tr '\n' '|' | \
+        sed 's/|$//'
+    fi
+}
+
+# Output handling: copy to clipboard and optionally print to stdout
 output_handler() {
     local content="$1"
-
-    # Copy to clipboard
     echo -n "$content" | eval "$CLIP_CMD"
-
-    # Print if not quiet or if it's tree-only mode
     if [ "$QUIET" = "false" ] || [ "$tree_only" = "true" ]; then
         echo "$content"
     fi
-
-    # Show feedback only for file copies, not tree-only mode
     if [ "$tree_only" != "true" ]; then
         local file_count
         file_count=$(echo "$content" | grep -c "^## File:" || true)
@@ -273,7 +262,7 @@ output_handler() {
     fi
 }
 
-# Process multiple targets
+# Process multiple targets (files and directories)
 process_targets() {
     local output=""
     local target
@@ -294,9 +283,8 @@ process_targets() {
     output_handler "$output"
 }
 
+# Main: parse arguments, launch interactive mode if no targets, and process targets
 main() {
-    local custom_ignores=""
-    local tree_only="false"
     local targets=()
 
     # Parse arguments
@@ -309,30 +297,32 @@ main() {
             -q|--quiet) QUIET="true"; shift ;;
             -p|--print) QUIET="false"; shift ;;
             --debug) DEBUG="true"; shift ;;
+            --git-diff) GIT_DIFF="true"; shift ;;
+            --git-only) GIT_ONLY="true"; shift ;;
             *) targets+=("$1"); shift ;;
         esac
     done
 
     detect_os
 
-    # Interactive mode if no targets
+    # If no targets provided, launch interactive mode
     if [ ${#targets[@]} -eq 0 ]; then
-        debug "Starting interactive mode"
         if setup_fzf; then
+            local root_dir
+            root_dir=$(find_root)
             local gitignore_pattern=""
-            [ -f ".gitignore" ] && gitignore_pattern=$(parse_gitignore ".gitignore")
+            if [ -f "$root_dir/.gitignore" ]; then
+                gitignore_pattern=$(parse_gitignore "$root_dir/.gitignore")
+                debug "Using gitignore pattern: $gitignore_pattern"
+            fi
 
-            debug "Running fzf selection"
             local selected
             selected=$(run_fzf "$gitignore_pattern" "$custom_ignores")
-
             if [ -n "$selected" ]; then
-                debug "Processing selection"
                 while IFS= read -r line; do
                     [ -n "$line" ] && targets+=("$line")
                 done <<< "$selected"
             else
-                debug "No selection made"
                 exit 0
             fi
         else
@@ -341,7 +331,6 @@ main() {
     fi
 
     if [ ${#targets[@]} -gt 0 ]; then
-        debug "Processing ${#targets[@]} targets"
         process_targets "${targets[@]}"
     fi
 }
