@@ -2,10 +2,26 @@
 
 # Config
 set -eo pipefail
+
+# Default configuration values
 CLIP_CMD=""
 VERSION="1.0.0"
 QUIET="true"
 DEBUG="false"
+
+custom_ignores=""  # default ignore patterns if any
+tree_only="false"
+
+# -- New: Load configuration file --
+# Allow overriding the default config file path via LLMCAT_CONFIG env variable
+CONFIG_FILE="${LLMCAT_CONFIG:-$HOME/.llmcatrc}"
+if [ -f "$CONFIG_FILE" ]; then
+    # Optionally, you can print a debug message if DEBUG is enabled
+    # (If DEBUG isn’t set yet, you can always echo or remove this line)
+    echo "Loading configuration from $CONFIG_FILE" >&2
+    source "$CONFIG_FILE"
+fi
+# -----------------------------------
 
 # Help text
 show_help() {
@@ -18,11 +34,11 @@ Usage: llmcat [options] [path]
 Options:
     -h, --help              Show this help message
     -i, --ignore PATTERN    Additional ignore patterns (grep -E format)
-    -v, --version          Show version
-    -t, --tree-only        Only output directory tree
-    -q, --quiet            Silent mode (only copy to clipboard)
-    -p, --print            Print copied files/content (default: quiet)
-    --debug                Enable debug output
+    -v, --version           Show version
+    -t, --tree-only         Only output directory tree
+    -q, --quiet             Silent mode (only copy to clipboard)
+    -p, --print             Print copied files/content (default: quiet)
+    --debug                 Enable debug output
 
 Interactive Mode (fzf):
     tab          - Select/mark multiple files
