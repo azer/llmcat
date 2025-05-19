@@ -5,6 +5,7 @@ set -eo pipefail
 CLIP_CMD=""
 VERSION="2.0.0"
 QUIET="true"
+NOCLIP="false"
 DEBUG="false"
 FILE_COUNT=0  # Initialize the file counter
 
@@ -22,7 +23,8 @@ Options:
     -v, --version           Show version
     -t, --tree-only         Only output directory tree
     -q, --quiet             Silent mode (only copy to clipboard)
-    -p, --print             Print copied files/content (default: quiet)
+    -p, --print             Print copied files/content, and also copy to clipboard (default: quiet)
+    -P, --print-only        Print copied files/content, but DON'T copy to clipboard (default: quiet)
     -n, --no-ignore         Don't respect gitignore/ignore files
     -H, --hidden            Include hidden files/directories
     --debug                 Enable debug output
@@ -48,6 +50,9 @@ Examples:
 
     # Print content while copying
     llmcat -p ./src/file.txt
+
+    # Print content without copying to clipboard
+    llmcat -P ./src/file.txt
 
 Features:
     - Interactive fuzzy finder with file preview
@@ -246,8 +251,10 @@ process_dir() {
 output_handler() {
     local content="$1"
 
-    # Copy to clipboard
-    echo -n "$content" | eval "$CLIP_CMD"
+    # Copy to clipboard unless -P option was used
+    if [ "$NOCLIP" = "false" ]; then
+        echo -n "$content" | eval "$CLIP_CMD"
+    fi
 
     # Print if not quiet or if it's tree-only mode
     if [ "$QUIET" = "false" ] || [ "$tree_only" = "true" ]; then
@@ -256,7 +263,11 @@ output_handler() {
 
     # Show feedback only for file copies, not tree-only mode
     if [ "$tree_only" != "true" ]; then
-        echo "Copied $FILE_COUNT file(s) to clipboard" >&2
+        if [ "$NOCLIP" = "false" ]; then
+            echo "Copied $FILE_COUNT file(s) to clipboard" >&2
+        else
+            echo "Copied $FILE_COUNT file(s) to STDOUT" >&2
+        fi
     fi
 }
 
@@ -317,10 +328,16 @@ main() {
                 tree_only="true"; 
                 shift ;;
             -q|--quiet) 
-                QUIET="true"; 
+                QUIET="true";
+                NOCLIP="false";
                 shift ;;
             -p|--print) 
-                QUIET="false"; 
+                QUIET="false";
+                NOCLIP="false";
+                shift ;;
+            -P|--print-only)
+                QUIET="false";
+                NOCLIP="true";
                 shift ;;
             --debug) 
                 DEBUG="true"; 
